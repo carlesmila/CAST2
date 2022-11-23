@@ -2,19 +2,17 @@
 % Please edit documentation in R/knndm.R
 \name{knndm}
 \alias{knndm}
-\title{EXPERIMENTAL K-fold Nearest Neighbour Distance Matching function}
+\title{EXPERIMENTAL K-fold Nearest Neighbour Distance Matching}
 \usage{
 knndm(
   tpoints,
   modeldomain = NULL,
   ppoints = NULL,
-  k = 10,
-  kclust = NULL,
-  maxsize = NULL,
+  k = 5,
+  maxp = NULL,
+  linkf = "ward.D2",
   samplesize = 1000,
-  sampling = "regular",
-  cl = NULL,
-  verbose = T
+  sampling = "regular"
 )
 }
 \arguments{
@@ -24,32 +22,28 @@ knndm(
 
 \item{ppoints}{sf or sfc point object. Contains the target prediction points. Optional. Alternative to modeldomain (see Details).}
 
-\item{k}{integer. Final number of folds desired for CV. Defaults to 10.}
+\item{k}{integer. Final number of folds desired for CV. Defaults to 5.}
 
-\item{kclust}{integer. Intermediate number of clusters for agglomerative clustering. Lower numbers result in faster results,
-but the quality of the results may be compromised. Defaults to half of the training points.
-Consider increasing that number if G*j(r) < Gij(r) for short distances, which may happen in cases with weak clustering.}
+\item{maxp}{numeric. Maximum fold size allowed, defaults to 1/k*2. Partitions leading to larger folds than `maxp` are discarded.
+Increase if a better fit is required at the cost of having less balanced folds.}
 
-\item{maxsize}{numeric. maximum proportion of training samples to have in a fold. Defaults to 1/k*2}
+\item{linkf}{character. Link function for agglomerative clustering. Defaults to "ward.D2" for balanced clusters.
+Check `stats::hclust` for other options.}
 
 \item{samplesize}{numeric. How many points in the modeldomain should be sampled as prediction points?
 Only required if modeldomain is used instead of ppoints.}
 
-\item{sampling}{character. How to draw prediction points from the modeldomain? See spsample. Use sampling = "Fibonacci" for global applications.
+\item{sampling}{character. How to draw prediction points from the modeldomain? See spsample. Use "Fibonacci" for global applications.
 Only required if modeldomain is used instead of ppoints.}
-
-\item{cl}{TBC.}
-
-\item{verbose}{logical. Show progress, TRUE by default.}
 }
 \value{
-An object of class \emph{knndm} consisting of a list of six elements:
+An object of class \emph{knndm} consisting of a list of seven elements:
 indx_train, indx_test (indices of the observations to use as
 training/test data in each kNNDM CV iteration), Gij (distances for
 G function construction between prediction and target points), Gj
 (distances for G function construction during LOO CV), Gjstar (distances
-for modified G function during kNNDM CV), clusters (ordered list of cluster
-IDs for each training point).
+for modified G function during kNNDM CV), clusters (list of cluster IDs), and
+stat (Wasserstein distance statistic).
 }
 \description{
 This function implements the kNNDM algorithm and returns the necessary
@@ -59,37 +53,61 @@ indices to perform a kNNDM CV for map validation.
 TBC.
 }
 \note{
-Experimental cycle. Parallel implementation pending. Missing references.
+Experimental cycle. Documentation to be completed. Missing references. Large distance matrices?
 }
 \examples{
 ########################################################################
-# Example 1: Simulated data
+# Example 1: Simulated data - Randomly-distributed training points
 ########################################################################
 
 library(sf)
 library(ggplot2)
 
-# Simulate 10000 clustered training points in a 100x100 square
+# Simulate 1000 random training points in a 100x100 square
 set.seed(1234)
 simarea <- list(matrix(c(0,0,0,100,100,100,100,0,0,0), ncol=2, byrow=TRUE))
 simarea <- sf::st_polygon(simarea)
-train_points <- clustered_sample(simarea, 500, 50, 5)
+train_points <- sf::st_sample(simarea, 1000, type = "random")
 pred_points <- sf::st_sample(simarea, 1000, type = "regular")
 
 # Run kNNDM for the whole domain, here the prediction points are known.
-knndm_pred <- knndm(train_points, ppoints = pred_points)
-plot(knndm_pred)
+knndm_folds <- knndm(train_points, ppoints = pred_points)
+knndm_folds$stat # Integral between the two curves
+plot(knndm_folds)
 ggplot() +
   geom_sf(data = simarea, alpha = 0) +
-  geom_sf(data = train_points, col = knndm_pred$clusters)
+  geom_sf(data = train_points, col = knndm_folds$clusters)
 
 ########################################################################
-# Example 2: Real- world example; using a modeldomain instead of previously
+# Example 2: Simulated data - Clustered training points
+########################################################################
+
+library(sf)
+library(ggplot2)
+
+# Simulate 1000 clustered training points in a 100x100 square
+set.seed(1234)
+simarea <- list(matrix(c(0,0,0,100,100,100,100,0,0,0), ncol=2, byrow=TRUE))
+simarea <- sf::st_polygon(simarea)
+train_points <- clustered_sample(simarea, 1000, 50, 5)
+pred_points <- sf::st_sample(simarea, 1000, type = "regular")
+
+# Run kNNDM for the whole domain, here the prediction points are known.
+knndm_folds <- knndm(train_points, ppoints = pred_points)
+knndm_folds$stat # Integral between the two curves
+plot(knndm_folds)
+ggplot() +
+  geom_sf(data = simarea, alpha = 0) +
+  geom_sf(data = train_points, col = knndm_folds$clusters)
+
+########################################################################
+# Example 3: Real- world example; using a modeldomain instead of previously
 # sampled prediction locations
 ########################################################################
 \dontrun{
 library(sf)
 library(raster)
+library(ggplot2)
 
 ### prepare sample data:
 dat <- get(load(system.file("extdata","Cookfarm.RData",package="CAST")))
@@ -100,10 +118,12 @@ pts <- st_as_sf(pts,coords=c("Easting","Northing"))
 st_crs(pts) <- 26911
 studyArea <- raster::stack(system.file("extdata","predictors_2012-03-25.grd",package="CAST"))
 
-knndm_folds <- knndm(pts, k=5, modeldomain=studyArea)
+knndm_folds <- knndm(pts, modeldomain=studyArea)
+knndm_folds$stat # Integral between the two curves
 plot(knndm_folds)
+plot_geodist(pts, studyArea, cvfolds = knndm_folds$indx_test)
 ggplot() +
-  geom_sf(data = knndm_folds, col = knndm_folds$clusters)
+  geom_sf(data = pts, col = knndm_folds$clusters)
 
 #use for cross-validation:
 library(caret)
