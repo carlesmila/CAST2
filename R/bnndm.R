@@ -1,4 +1,4 @@
-#' NN distance based CV
+#' NN distance based block CV
 #' @description
 #' This function estimates the optimal cross-validation folds.
 #' Therefore the function calculates the nearest neighbor distance
@@ -8,7 +8,7 @@
 #' density distributions. The magnitude of difference between
 #' the prediction to sample nearest neighbor density distribution to
 #' that of different cross-validation folds is quantified using
-#' the Kolmogorov-Smirnov Test. The cross-validation folds yielding
+#' the Wasserstein test. The cross-validation folds yielding
 #' the lowest magnitude of distance towards the sample to prediction
 #' nearest neighbor density distribution is then chosen as the final
 #' split.
@@ -41,14 +41,6 @@ block_nndm_par <- function(x=samplepoints,
                    maxn = 36,
                    n_cores=6) {
 
-  x=train_points[[3]]
-  modeldomain=raster::stack("data/species_stack.grd")
-  samplesize=1000;
-  sampling = "regular";
-  w = 60;
-  n_steps = 6;
-  maxn = 36;
-  n_cores=6
 
   # input formatting --------------------------------------------------------
 
@@ -330,5 +322,3 @@ block_nndm_par <- function(x=samplepoints,
   return(rtrn)
 
 }
-
-
