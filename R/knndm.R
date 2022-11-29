@@ -149,7 +149,7 @@ knndm <- function(tpoints, modeldomain = NULL, ppoints = NULL,
 
   # Build grid of number of clusters to try - we sample low numbers more intensively
   clustgrid <- data.frame(nk = as.integer(round(exp(seq(log(k), log(nrow(tpoints)),
-                                                          length.out = 50)))))
+                                                          length.out = 100)))))
   clustgrid$stat <- NA
   clustgrid <- clustgrid[!duplicated(clustgrid$nk),]
   clustgroups <- list()
