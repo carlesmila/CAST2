@@ -23,7 +23,7 @@
 #' @param sampling The type in which the samplepoints are generated. The default value is "Fibonacci", which is recommended for global studies.
 #' @param w The window size. By default 60.
 #' @param n_steps The number of steps until termination.
-#' @param maxn The maximal number of clusters to be fitted. One of {4,9,16,25,36,49,...}. By default 36.
+#' @param maxn The maximal number of clusters to be fitted. By default 10.
 #' @param cl A cluster object.
 #' @details The nearest neighbor distance distribution between training and prediction locations,
 #' as well as between cross-validation folds are calculated. Based on that, the
@@ -37,14 +37,14 @@ bnndm_cl <- function(x=samplepoints,
                    samplesize=1000,
                    sampling = "regular",
                    w = 60,
-                   n_steps = 6,
-                   maxn = 36,
+                   n_steps = 10,
+                   maxn = 10,
                    cl=NULL) {
 
 
   # input formatting --------------------------------------------------------
 
-  possible_n <- c(2:sqrt(maxn))^2
+  possible_n <- 2:maxn
 
 
   if (!inherits(x, "sf")) {
@@ -130,29 +130,17 @@ bnndm_cl <- function(x=samplepoints,
   ugtp <- sf::st_cast(ugt, "POINT",group_or_split=TRUE)
   ugtp <- ugtp[duplicated(ugtp$id)==FALSE,]
 
+
   # assign initial groups to the tpoints -----------------------------------
 
-  # function to compute out-of-fold NN distance (see kNNDM)
-  distclust <- function(distm, folds){
+  coords <- sf::st_coordinates(ugtp) |> as.matrix()
+  clust <- lapply(possible_n, function(y) {
+    c <- stats::kmeans(x=coords, centers = y)
+    c$cluster})
 
-    alldist <- c()
-    for(f in unique(folds)){
-      alldist <- c(alldist, apply(distm[f == folds, f != folds, drop=FALSE], 1, min))
-    }
-    alldist
-  }
-
-  # assign initial folds based on hclustering (see kNNDM)
-  clust <- 1:nrow(ugtp)
-  distmat <- sf::st_distance(ugtp)
-  units(distmat) <- NULL
-  Gj <- distclust(distmat, clust)
-  hc <- stats::hclust(d = stats::as.dist(distmat), method="ward.D2")
-
-  clust_nk <- lapply(possible_n, stats::cutree, tree=hc)
-  clust_nk <- do.call("cbind.data.frame", clust_nk)
-  names(clust_nk) <- paste0("groups_", 1:ncol(clust_nk))
-  ugt <- cbind(ugt, clust_nk)
+  clust <- do.call(cbind.data.frame, clust)
+  colnames(clust) <- paste0("groups_", 1:ncol(clust))
+  ugt <- cbind(ugt, clust)
 
 
   # assign folds based on probabilities -----------------------------------
@@ -223,14 +211,14 @@ bnndm_cl <- function(x=samplepoints,
 
   # assign folds to tpoints
   pts_f <- lapply(ugt_folds, sf::st_join,x=x)
-  pts_id_w <- lapply(pts_f,sf::st_drop_geometry)
-  pts_id_w <- lapply(pts_id_w, as.data.frame)
+  pts_id_w <- lapply(pts_f,function(x) sf::st_drop_geometry(x) |> as.data.frame())
   for (i in seq_along(pts_id_w)) {
     f <- (i+1)^2
     colnames(pts_id_w[[i]]) <- paste0(f,"_fold_p_", 1:ncol(pts_id_w[[i]]))
   }
 
   pts_id_w <- do.call(cbind.data.frame, pts_id_w)
+  # folds _ number of probability step
 
   # create caret folds
   spatialfolds <- list()
@@ -238,7 +226,7 @@ bnndm_cl <- function(x=samplepoints,
   for (i in 1:ncol(pts_id_w)) {
     df_c[[i]] <- as.data.frame(pts_id_w[,i])
     names(df_c[[i]]) <- paste0("cl_",i)
-    f[[i]] <- nrow(unique(df_c[[i]]))
+    f[[i]] <- length(unique(df_c[[i]][!is.na(df_c[[i]])]))
     spatialfolds[[i]] <- CAST::CreateSpacetimeFolds(df_c[[i]],
                                                     spacevar = paste0("cl_",i),
                                                     k=f[[i]])
@@ -262,10 +250,15 @@ bnndm_cl <- function(x=samplepoints,
 
 
   # loop over folds to calculate CV-distance for each block size
-  parallel::clusterExport(cl=cl, varlist=c("spatialfolds","cvdistance", "x"), envir=environment())
-  cv_dist <- snow::parLapply(cl, spatialfolds, function(y){
-    cvdistance(x=x, cvfolds=y$indexOut)
-  })
+  if(!is.null(cl)) {
+    parallel::clusterExport(cl=cl, varlist=c("spatialfolds","cvdistance", "x"), envir=environment())
+    cv_dist <- snow::parLapply(cl, spatialfolds, function(y){
+      cvdistance(x=x, cvfolds=y$indexOut)
+    })
+  } else {
+    cv_dist <- lapply(spatialfolds, function(y){
+      cvdistance(x=x, cvfolds=y$indexOut) })
+  }
 
 
   # calculate the difference to sample2prediction distribution for each chunk -----
@@ -312,6 +305,7 @@ bnndm_cl <- function(x=samplepoints,
     pts_cv <- pts_id_rand
     sf::st_geometry(pts_cv) <- "geom"
     cv_dist_sel <- cv_dist_rand
+    print("random CV")
   } else {
     # caret cv folds
     spatialfolds <- spatialfolds[[n_sel]]
@@ -354,7 +348,7 @@ bnndm_cl <- function(x=samplepoints,
 
   rtrn <- list(indx_train = spatialfolds$index, indx_test = spatialfolds$indexOut, pts_cv,
                nnd_plot, nnd_plot_ecdf, nnd_distances, ws_dist[ws_dist$D==min(ws_dist$D),"D"][[1]])
-    names(rtrn) <- c("indx_train","indx_test", "pts_with_cv", "nnd_plot", "nnd_plot_ecdf", "nnd_distances", "WS_distance")
+  names(rtrn) <- c("indx_train","indx_test", "pts_with_cv", "nnd_plot", "nnd_plot_ecdf", "nnd_distances", "WS_distance")
   return(rtrn)
 
 }
