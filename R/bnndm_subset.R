@@ -28,8 +28,8 @@
 #' @details The nearest neighbor distance distribution between training and prediction locations,
 #' as well as between cross-validation folds are calculated. Based on that, the
 #' cross-validation split yielding the lowest distance between those distributions is chosen.
-#' @export block_nndm
-#' @aliases block_nndm
+#' @export bnndm_cl
+#' @aliases bnndm_cl
 
 
 bnndm_cl <- function(x=samplepoints,

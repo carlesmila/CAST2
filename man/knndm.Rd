@@ -8,7 +8,7 @@ knndm(
   tpoints,
   modeldomain = NULL,
   ppoints = NULL,
-  k = 5,
+  k = 10,
   maxp = NULL,
   linkf = "ward.D2",
   samplesize = 1000,
@@ -50,10 +50,16 @@ This function implements the kNNDM algorithm and returns the necessary
 indices to perform a kNNDM CV for map validation.
 }
 \details{
-TBC.
+knndm is a k-fold version inspired in NNDM LOO CV. After testing for clustering in the data,
+the function builds an agglomerative hierarchical tree to cluster the training point locations based on
+their distance matrix (euclidean if CRS is projected, great circle if geographical coordinates are used).
+Several numbers of clusters are tried, and once formed, randomly grouped in the resulting k folds.
+Amongst the different cluster configurations, the one that minimises the integral of the difference
+(Wasserstein statistic) between the train-to-prediction nearest neighbour distribution function (Gij)
+and the train-to-CV nearest neighbour distribution function (Gjstar) is selected.
 }
 \note{
-Experimental cycle. Documentation to be completed. Missing references. Large distance matrices?
+Experimental cycle.
 }
 \examples{
 ########################################################################

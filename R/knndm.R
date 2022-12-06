@@ -25,8 +25,14 @@
 #' for modified G function during kNNDM CV), clusters (list of cluster IDs), and
 #' stat (Wasserstein distance statistic).
 #'
-#' @details TBC.
-#' @note Experimental cycle. Documentation to be completed. Missing references. Large distance matrices?
+#' @details knndm is a k-fold version inspired in NNDM LOO CV. After testing for clustering in the data,
+#' the function builds an agglomerative hierarchical tree to cluster the training point locations based on
+#' their distance matrix (euclidean if CRS is projected, great circle if geographical coordinates are used).
+#' Several numbers of clusters are tried, and once formed, randomly grouped in the resulting k folds.
+#' Amongst the different cluster configurations, the one that minimises the integral of the difference
+#' (Wasserstein statistic) between the train-to-prediction nearest neighbour distribution function (Gij)
+#' and the train-to-CV nearest neighbour distribution function (Gjstar) is selected.
+#' @note Experimental cycle.
 #' @export
 #'
 #' @examples
@@ -110,7 +116,7 @@
 #' model_knndm
 #'}
 knndm <- function(tpoints, modeldomain = NULL, ppoints = NULL,
-                  k = 5, maxp = NULL, linkf = "ward.D2",
+                  k = 10, maxp = NULL, linkf = "ward.D2",
                   samplesize = 1000, sampling = "regular"){
 
   # Prior checks
@@ -144,57 +150,68 @@ knndm <- function(tpoints, modeldomain = NULL, ppoints = NULL,
   Gij <- apply(Gij, 1, min)
   units(Gij) <- NULL
 
-  # Hierarchical clustering
-  hc <- stats::hclust(d = stats::as.dist(distmat), method=linkf)
+  # Check if there's is clustering in the data in the first place
+  testks <- stats::ks.test(Gj, Gij, alternative = "great")
+  if(testks$p.value >= 0.05){
 
-  # Build grid of number of clusters to try - we sample low numbers more intensively
-  clustgrid <- data.frame(nk = as.integer(round(exp(seq(log(k), log(nrow(tpoints)),
+    clust <- sample(rep(1:k, ceiling(nrow(tpoints)/k)), size = nrow(tpoints), replace=F)
+    Gjstar <- distclust(distmat, clust)
+    stat_final <- twosamples::wass_stat(Gjstar, Gij)
+    warning("No evidence of clustering has been found, a random CV assignment is returned")
+
+  }else{
+
+    # Hierarchical clustering
+    hc <- stats::hclust(d = stats::as.dist(distmat), method=linkf)
+
+    # Build grid of number of clusters to try - we sample low numbers more intensively
+    clustgrid <- data.frame(nk = as.integer(round(exp(seq(log(k), log(nrow(tpoints)),
                                                           length.out = 100)))))
-  clustgrid$stat <- NA
-  clustgrid <- clustgrid[!duplicated(clustgrid$nk),]
-  clustgroups <- list()
+    clustgrid$stat <- NA
+    clustgrid <- clustgrid[!duplicated(clustgrid$nk),]
+    clustgroups <- list()
 
-  # We test each number of clusters
-  for(nk in clustgrid$nk){
+    # We test each number of clusters
+    for(nk in clustgrid$nk){
 
-    # Cut nk clusters
-    clust_nk <- stats::cutree(hc, k=nk)
-    tabclust <- as.data.frame(table(clust_nk))
-    tabclust <- tabclust[order(tabclust$Freq, decreasing=T),]
-    tabclust$clust_k <- NA
+      # Cut nk clusters
+      clust_nk <- stats::cutree(hc, k=nk)
+      tabclust <- as.data.frame(table(clust_nk))
+      tabclust <- tabclust[order(tabclust$Freq, decreasing=T),]
+      tabclust$clust_k <- NA
 
-    # We don't merge big clusters
-    clust_i <- 1
-    for(i in 1:nrow(tabclust)){
-      if(tabclust$Freq[i] >= nrow(tpoints)/k){
-        tabclust$clust_k[i] <- clust_i
-        clust_i <- clust_i + 1
+      # We don't merge big clusters
+      clust_i <- 1
+      for(i in 1:nrow(tabclust)){
+        if(tabclust$Freq[i] >= nrow(tpoints)/k){
+          tabclust$clust_k[i] <- clust_i
+          clust_i <- clust_i + 1
+        }
+      }
+      rm("clust_i")
+      clust_i <- setdiff(1:k, unique(tabclust$clust_k))
+      tabclust$clust_k[is.na(tabclust$clust_k)] <- rep(clust_i, ceiling(nk/length(clust_i)))[1:sum(is.na(tabclust$clust_k))]
+      tabclust2 <- data.frame(ID = 1:length(clust_nk), clust_nk = clust_nk)
+      tabclust2 <- merge(tabclust2, tabclust, by = "clust_nk")
+      tabclust2 <- tabclust2[order(tabclust2$ID),]
+      clust_k <- tabclust2$clust_k
+
+      # Compute statistic if not exceeding limit
+      if(!any(table(clust_k)/length(clust_k)>maxp)){
+        Gjstar_i <- distclust(distmat, clust_k)
+        clustgrid$stat[clustgrid$nk==nk] <- twosamples::wass_stat(Gjstar_i, Gij)
+        clustgroups[[paste0("nk", nk)]] <- clust_k
       }
     }
-    rm("clust_i")
-    clust_i <- setdiff(1:k, unique(tabclust$clust_k))
-    tabclust$clust_k[is.na(tabclust$clust_k)] <- rep(clust_i, ceiling(nk/length(clust_i)))[1:sum(is.na(tabclust$clust_k))]
-    tabclust2 <- data.frame(ID = 1:length(clust_nk), clust_nk = clust_nk)
-    tabclust2 <- merge(tabclust2, tabclust, by = "clust_nk")
-    tabclust2 <- tabclust2[order(tabclust2$ID),]
-    clust_k <- tabclust2$clust_k
-
-    # Compute statistic if not exceeding limit
-    if(!any(table(clust_k)/length(clust_k)>maxp)){
-      Gjstar_i <- distclust(distmat, clust_k)
-      clustgrid$stat[clustgrid$nk==nk] <- twosamples::wass_stat(Gjstar_i, Gij)
-      clustgroups[[paste0("nk", nk)]] <- clust_k
-    }
+    # Final configuration
+    k_final <- clustgrid$nk[which.min(clustgrid$stat)]
+    stat_final <- min(clustgrid$stat, na.rm=T)
+    clust <- clustgroups[[paste0("nk", k_final)]]
+    Gjstar <- distclust(distmat, clust)
   }
 
-  # Final configuration
-  k_final <- clustgrid$nk[which.min(clustgrid$stat)]
-  stat_final <- min(clustgrid$stat, na.rm=T)
-  clust <- clustgroups[[paste0("nk", k_final)]]
-  Gjstar <- distclust(distmat, clust)
-  cfolds <- CAST::CreateSpacetimeFolds(data.frame(clust=clust), spacevar = "clust", k = k)
-
   # Output
+  cfolds <- CAST::CreateSpacetimeFolds(data.frame(clust=clust), spacevar = "clust", k = k)
   res <- list(clusters = clust,
               indx_train = cfolds$index, indx_test = cfolds$indexOut,
               Gij = Gij, Gj = Gj, Gjstar = Gjstar, stat = stat_final)
