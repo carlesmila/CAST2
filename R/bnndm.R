@@ -64,7 +64,7 @@
 
 
 
-bnndmt <- function(x=NULL,
+bnndm <- function(x=NULL,
                      modeldomain=NULL,
                      samplesize=1000,
                      sampling = "regular",
