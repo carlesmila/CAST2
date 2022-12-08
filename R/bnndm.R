@@ -21,30 +21,63 @@
 #' @param samplesize Optional. The number of samplepoints generated in the modeldomain to describe the prediction space.
 #' If NULL (default), the samplesize equals the number of cells in the predictor raster divided by ten.
 #' @param sampling The type in which the samplepoints are generated. The default value is "Fibonacci", which is recommended for global studies.
-#' @param w The window size. By default 60.
 #' @param n_steps The number of steps until termination.
-#' @param maxn The maximal number of clusters to be fitted. One of {4,9,16,25,36,49,...}. By default 36.
-#' @param n_cores The number of cores used. By default 6.
+#' @param maxn The maximal number of clusters to be fitted. By default 10.
+#' @param cl A cluster object.
 #' @details The nearest neighbor distance distribution between training and prediction locations,
 #' as well as between cross-validation folds are calculated. Based on that, the
-#' cross-validation split yielding the lowest distance between those distributions is chosen.
-#' @export block_nndm_par
-#' @aliases block_nndm_par
+#' cross-validation split yielding the lowest distance between those distributions is chosen.#' @details TBC.
+#' @note Experimental.
+#' @export
+#'
+#' @examples
+#' #' library(sf)
+#' library(raster)
+#' library(ggplot2)
+#'
+#' ### prepare sample data:
+#' dat <- get(load(system.file("extdata","Cookfarm.RData",package="CAST")))
+#' dat <- aggregate(dat[,c("DEM","TWI", "NDRE.M", "Easting", "Northing","VW")],
+#'    by=list(as.character(dat$SOURCEID)),mean)
+#' pts <- dat[,-1]
+#' pts <- st_as_sf(pts,coords=c("Easting","Northing"))
+#' st_crs(pts) <- 26911
+#' studyArea <- raster::stack(system.file("extdata","predictors_2012-03-25.grd",package="CAST"))
+#'
+#' bnndm_folds <- bnndm(pts, modeldomain=studyArea)
+#' bnndm_folds$stat # Integral between the two curves
+#' plot(bnndm_folds)
+#' plot_geodist(pts, studyArea, cvfolds = bnndm_folds$indx_test)
+#' ggplot() +
+#'   geom_sf(data = pts, col = bnndm_folds$clusters)
+#'
+#' #use for cross-validation:
+#' library(caret)
+#' ctrl <- trainControl(method="cv",
+#'    index=bnndm_folds$indx_train)
+#' model_bnndm <- train(dat[,c("DEM","TWI", "NDRE.M")],
+#'    dat$VW,
+#'    method="rf",
+#'    trControl = ctrl)
+#' model_bnndm
+#'}
 
 
-block_nndm_par <- function(x=samplepoints,
-                   modeldomain=predictors,
-                   samplesize=1000,
-                   sampling = "regular",
-                   w = 60,
-                   n_steps = 6,
-                   maxn = 36,
-                   n_cores=6) {
+
+bnndmt <- function(x=NULL,
+                     modeldomain=NULL,
+                     samplesize=1000,
+                     sampling = "regular",
+                     n_steps = 10,
+                     maxn = 10,
+                     cl=NULL) {
 
 
   # input formatting --------------------------------------------------------
 
-  # input formatting
+  possible_n <- 2:maxn
+
+
   if (!inherits(x, "sf")) {
     x <- sf::st_as_sf(x) |>
       sf::st_geometry() |>
@@ -62,18 +95,10 @@ block_nndm_par <- function(x=samplepoints,
 
   modeldomain <- terra::project(modeldomain, terra::crs(x))
 
-  if(is.null(samplesize)) {
-    samplesize = terra::ncell(modeldomain) / 10
-  } else {
-    samplesize = samplesize
-  }
-
 
   # calculate nn distance of samples to prediction --------------------------
 
-  # define functions
-
-  # Sample prediction location from the study area:
+   # Sample prediction location from the study area:
   sampleFromArea <- function(modeldomain, samplesize, sampling){
 
     ##### Distance to prediction locations:
@@ -84,11 +109,16 @@ block_nndm_par <- function(x=samplepoints,
       message(paste0("samplesize for new data shouldn't be larger than number of pixels.
               Samplesize was reduced to ",terra::ncell(modeldomain)))
     }
-    modeldomainextent <- sf::st_as_sf(sf::st_as_sfc(sf::st_bbox(modeldomain)))
+
 
     sf::sf_use_s2(FALSE)
-    sf::st_as_sf(modeldomainextent) |>
-      sf::st_transform(4326) -> bb
+
+    bb <- terra::as.polygons(modeldomain) |>
+      sf::st_as_sf() |>
+      sf::st_geometry() |>
+      sf::st_union() |>
+      sf::st_transform(4326)
+
     methods::as(bb, "Spatial") |>
       sp::spsample(n = samplesize, type = sampling)  |>
       sf::st_as_sfc() |>
@@ -100,225 +130,212 @@ block_nndm_par <- function(x=samplepoints,
 
   }
 
+
   # calculate sample2prediction distance
-  sample2prediction <- function(x, modeldomain, samplesize){
+  modeldomain <- sampleFromArea(modeldomain, samplesize, sampling)
 
-    modeldomain <- sf::st_transform(modeldomain, sf::st_crs(x))
-    sf::sf_use_s2(TRUE)
-    d0 <- sf::st_distance(modeldomain, x)
-    min_d0 <- apply(d0, 1, min)
-    sampletoprediction <- data.frame(dist = min_d0,
-                                     what = factor("sample-to-prediction"),
-                                     dist_type = "geo")
+  # Helper function: Compute out-of-fold NN distance
+  distclust <- function(distm, folds){
 
-
-    return(sampletoprediction)
+    alldist <- c()
+    for(f in unique(folds)){
+      alldist <- c(alldist, apply(distm[f == folds, f != folds, drop=FALSE], 1, min))
+    }
+    alldist
   }
 
-  suppressWarnings(modeldomain <- sampleFromArea(modeldomain, samplesize, sampling))
+  # Gj: NND function for a cluster per point, i.e. LOO CV
+  clust <- 1:nrow(x)
+  distmat <- sf::st_distance(x)
+  units(distmat) <- NULL
+  Gj <- distclust(distmat, clust)
 
-  suppressWarnings(s2p <- sample2prediction(x=x, modeldomain=modeldomain,
-                           samplesize=samplesize))
+  # Gij: prediction to training NN distances
+  Gij <- sf::st_distance(modeldomain, x)
+  Gij <- apply(Gij, 1, min)
+  units(Gij) <- NULL
+
+  # Check if there's is clustering in the data in the first place
+  testks <- stats::ks.test(Gj, Gij, alternative = "great")
+  if(testks$p.value >= 0.05){
+
+    k = 10
+    blocks <- sample(rep(1:k, ceiling(nrow(x)/k)), size = nrow(x), replace=F)
+    Gjstar <- distclust(distmat, blocks)
+    stat_final <- twosamples::wass_stat(Gjstar, Gij)
+    cfolds <- CAST::CreateSpacetimeFolds(data.frame(blocks=blocks), spacevar = "blocks", k = k)
+
+    warning("No evidence of clustering has been found, a random CV assignment is returned")
 
 
-  # split into CV folds ----------------------------------------
-  bb <- sf::st_bbox(x) |> sf::st_as_sfc()
+  } else {
 
-  ugt <- sf::st_make_grid(bb, n=w) |> sf::st_as_sf()
-  ugt$id <- as.numeric(rownames(ugt))
 
-  # assign groups (folds)
-  possible_n <- c(2:sqrt(maxn))^2
-  pmin = 1/possible_n
-  pmax = 1
-  probs = lapply(pmin, seq, 1, length.out = n_steps)
-  probs = lapply(probs, function(x) {
-    x[[length(x)]] <- 1
-    return(x)
-  })
+    # assign initial groups to the tpoints -----------------------------------
 
-  group_mat <- function(x) {
-    nrow_m2 = w/nrow(x)
-    m2 <- matrix(1,nrow=nrow_m2,ncol=nrow_m2)
-    kronecker(x,m2)
-  }
+    coords <- sf::st_coordinates(x) |> as.matrix()
+    clust <- lapply(possible_n, function(y) {
+      c <- stats::kmeans(x=coords, centers = y)
+      c$cluster})
 
-  m <- list()
-  for (i in seq_along(possible_n)) {
-    m[[i]] <- matrix(1:possible_n[[i]], nrow=possible_n[[i]]^0.5,byrow=TRUE)
-  }
+    clust <- do.call(cbind.data.frame, clust)
+    colnames(clust) <- paste0("groups_", 1:ncol(clust))
+    pts_clust <- cbind(x, clust)
 
-  m_g <- lapply(m, group_mat)
+    if (n_steps == 1) {
 
-  # sample random numbers based on probabilities
-  cl <- parallel::makeCluster(mc <- getOption("cl.cores", n_cores))
-  parallel::clusterExport(cl=cl, varlist=c("m_g", "probs"), envir=environment())
+      pts_id_w <- sf::st_drop_geometry(pts_clust)
 
-  m_f <- snow::parLapply (cl, seq_along(m_g), function(i) {
-   return(lapply (seq_along(probs[[i]]), function(e) {
-      vapply(m_g[[i]],function(current_fold) {
-        other_folds <- unique(as.vector(m_g[[i]]))[-current_fold]
-        current_prob <- probs[[i]][[e]]
+      spatialfolds <- apply(pts_id_w, 2, function(y) {
+        inp <- as.data.frame(y)
+        k <- length(unique(inp[[1]]))
+        CAST::CreateSpacetimeFolds(inp, spacevar = colnames(inp), k=k)
+        })
+    } else {
+      # assign folds based on probabilities -----------------------------------
+
+      # function to assign folds based on probabilities
+      sample_f <- function(current_prob, current_fold) {
+
+        other_folds <- c(1:possible_n[[1]])[-current_fold]
+
         if(current_prob >= 1) {
           other_probs <- rep(0, length(other_folds))
         } else {
           other_probs <-  rep((1-current_prob)/(length(other_folds)),
                               length(other_folds))
         }
+
         sample(c(current_fold, other_folds),
                size = 1,
                prob = c(current_prob, other_probs))
-      },numeric(1))
-    }))
-  })
+      }
 
-  parallel::stopCluster(cl)
-
-  # assign sampled numbers to sf objects
-  m_fv <- lapply(m_f, function(x) lapply(x, as.vector))
-  m_fd <- lapply(m_fv, function(x) do.call("cbind.data.frame", x))
-  m_fd <- lapply(m_fd, function(x) {
-    colnames(x) <- paste0("p", 1:ncol(x))
-    return(x)})
-
-  ugt_folds <- lapply(m_fd, function(x) {
-    sf::st_as_sf(x, sf::st_geometry(ugt))
-  })
-
-  # join folds to points
-  pts_id <- lapply(ugt_folds, sf::st_join,x=x)
-  pts_id_w <- lapply(pts_id,sf::st_drop_geometry)
-  for (i in seq_along(pts_id_w)) {
-    f <- (i+1)^2
-    colnames(pts_id_w[[i]])<- paste0(f,"_fold_p_", 1:ncol(pts_id_w[[i]]))
-  }
-
-  pts_id_w <- do.call(cbind.data.frame, pts_id_w)
-
-  spatialfolds <- list()
-  df_c <- list()
-  for (i in 1:ncol(pts_id_w)) {
-    df_c[[i]] <- as.data.frame(pts_id_w[,i])
-    names(df_c[[i]]) <- paste0("cl_",i)
-    f[[i]] <- nrow(unique(df_c[[i]]))
-    spatialfolds[[i]] <- CAST::CreateSpacetimeFolds(df_c[[i]],
-                                                    spacevar = paste0("cl_",i),
-                                                    k=f[[i]])
-  }
+      # define probabilities
+      pmin <- 1/possible_n
+      probs <- lapply(pmin, function(pmin) {
+        pr <- seq(pmin, 1, length.out=n_steps) |>
+          as.data.frame() |>
+          t()
+      })
 
 
-  # calculate nn distance of cv folds ---------------------------------------
+      # assign probabilities to points
+      pts_p <- lapply(1:length(pmin), function(x) x=pts_clust)
+      pts_p <- mapply(cbind, pts_p, probs, SIMPLIFY = FALSE)
+      pts_p <- lapply(pts_p, sf::st_drop_geometry)
+      pts_p <- lapply(seq_along(pts_p), function(i) {
+        pts_p[[i]][,names(pts_p[[i]]) == paste0("groups_",i) | grepl("X", colnames(pts_p[[i]]))]
+      })
+      pts_p <- lapply(pts_p, function(y) {
+        colnames(y) <- c("groups", paste0("probs_", seq(1,n_steps)))
+        return(y)
+      })
 
-  cvdistance <- function(x, cvfolds){
-    d_cv <- c()
-    for (i in 1:length(cvfolds)){
-      d_cv_tmp <- sf::st_distance(x[cvfolds[[i]],], x[-cvfolds[[i]],])
-      d_cv <- c(d_cv,apply(d_cv_tmp, 1, min))
+
+      # sample folds and assign them to the reduced grid
+      df_temp <- data.frame(matrix(nrow=nrow(pts_p[[1]]),ncol=length(pts_p)))
+      f <- lapply(1:length(pts_p), function(x) x=df_temp)
+
+      pts_folds <- list()
+
+      for(i in seq_along(pts_p)) {
+        for (j in 1:nrow(pts_p[[i]])) {
+          for (k in paste0("probs_",1:(ncol(pts_p[[i]])-1))) {
+            current_fold <- pts_p[[i]][j,"groups"]
+            current_prob <- pts_p[[i]][j, k]
+
+            f[[i]][j,k] <- sample_f(current_prob, current_fold)
+          }
+        }
+        f[[i]] <- f[[i]][,grepl("probs", colnames(f[[i]]))]
+        colnames(f[[i]]) <- paste0("fold_", 1:n_steps)
+        pts_p[[i]] <- cbind(pts_p[[i]], f[[i]])
+        pts_p[[i]] <- pts_p[[i]][,colnames(pts_p[[i]]) %in% colnames(f[[i]])]
+
+        pts_folds[[i]] <-  sf::st_as_sf(pts_p[[i]], sf::st_geometry(pts_clust))
+
+      }
+
+      pts_id_w <- lapply(pts_folds,function(x) sf::st_drop_geometry(x) |> as.data.frame())
+      for (i in seq_along(pts_id_w)) {
+        colnames(pts_id_w[[i]]) <- paste0(i+1,"_fold_p_", 1:ncol(pts_id_w[[i]]))
+      }
+
+      pts_id_w <- do.call(cbind.data.frame, pts_id_w)
+      # folds _ number of probability step
+
+      # create caret folds
+      spatialfolds <- list()
+      df_c <- list()
+      for (i in 1:ncol(pts_id_w)) {
+        df_c[[i]] <- as.data.frame(pts_id_w[,i])
+        names(df_c[[i]]) <- paste0("cl_",i)
+        f[[i]] <- length(unique(df_c[[i]][!is.na(df_c[[i]])]))
+        spatialfolds[[i]] <- CAST::CreateSpacetimeFolds(df_c[[i]],
+                                                        spacevar = paste0("cl_",i),
+                                                        k=f[[i]])
+      }
     }
 
-    dists_cv <- data.frame(dist = d_cv,
-                           what = factor("CV-distances"),
-                           dist_type = "geo")
-    return(dists_cv)
-  }
 
 
-  # loop over folds to calculate CV-distance for each block size
-  cl <- parallel::makeCluster(mc <- getOption("cl.cores", n_cores))
-  parallel::clusterExport(cl=cl, varlist=c("spatialfolds", "cvdistance", "x"), envir=environment())
-  cv_dist <- snow::parLapply(cl, spatialfolds, function(y){
-    cvdistance(x=x, cvfolds=y$indexOut)
-  })
-  parallel::stopCluster(cl)
+    # calculate nn distance of cv folds ---------------------------------------
+
+    cvdistance <- function(x, cvfolds){
+      d_cv <- c()
+      d_cv <- lapply(cvfolds, function(y) {
+        d_cv_tmp <- sf::st_distance(x[y,], x[-y,])
+        c(d_cv,apply(d_cv_tmp, 1, min))
+      }) |> unlist()
+
+      d_cv
+    }
 
 
-  # calculate the difference to sample2prediction distribution for each chunk -----
-
-  # filter for cv fold sizes with insufficient size
-  n_m = list()
-  for(i in seq_along(cv_dist)) {
-    n_m[[i]] <- ifelse(nrow(cv_dist[[i]]) < 5, i, NaN)
-  }
-
-  rem <- n_m[which(!is.na(n_m))] |> unlist()
-
-  if(!is.null(rem)) {
-    cv_dist = cv_dist[-rem]
-    possible_n = possible_n[-(rem-2)]
-  }
-
-  ws_dist <- lapply(cv_dist, function(y) twosamples::wass_stat(s2p$dist, y$dist)) |>
-    do.call(what="rbind.data.frame")
-
-  names(ws_dist) <- "D"
-  ws_dist$n <- 1:nrow(ws_dist)
-
-  n_sel <- ws_dist[ws_dist$D==min(ws_dist$D),][["n"]]
-
-  if(length(n_sel)>1) {
-    n_sel <- n_sel[[1]]
-  }
+    # loop over folds to calculate CV-distance for each block size
+    if(!is.null(cl)) {
+      parallel::clusterExport(cl=cl, varlist=c("spatialfolds","cvdistance", "x"), envir=environment())
+      Gjstar <- parallel::parLapply(cl, spatialfolds, function(y) {
+        cvdistance(x=x, cvfolds=y$indexOut)
+      })
+    } else {
+      Gjstar <- lapply(spatialfolds, function(y){
+        cvdistance(x=x, cvfolds=y$indexOut) })
+    }
 
 
-  # check if random CV yields lower WS stat ---------------------------
-  pts_id_rand <- x
-  pts_id_rand$n <- sample(1:10, nrow(pts_id_rand), replace=TRUE)
-  rand_f <- CAST::CreateSpacetimeFolds(pts_id_rand, spacevar="n",k=10)
-  cv_dist_rand <- cvdistance(x=x, cvfolds=rand_f$index)
-  ws_dist_rand <- twosamples::wass_stat(s2p$dist, cv_dist_rand$dist)
+    # calculate the difference to sample2prediction distribution for each chunk -----
+
+    ws_dist <- lapply(Gjstar, function(y) twosamples::wass_stat(Gij, y)) |>
+      do.call(what="rbind.data.frame")
+
+    names(ws_dist) <- "D"
+    ws_dist$n <- 1:nrow(ws_dist)
+
+    n_sel <- ws_dist[ws_dist$D==min(ws_dist$D),][["n"]]
+
+    if(length(n_sel)>1) {
+      n_sel <- n_sel[[1]]
+    }
 
 
-  # create plot and return grid / assigned points ---------------------------
-
-  if(ws_dist_rand < min(ws_dist$D)) {
-    print("random CV")
-    spatialfold <- rand_f
-    pts_cv <- pts_id_rand
-    sf::st_geometry(pts_cv) <- "geom"
-    cv_dist_sel <- cv_dist_rand
-  } else {
     # caret cv folds
-    spatialfolds <- spatialfolds[[n_sel]]
+    cfolds <- spatialfolds[[n_sel]]
 
-    # grid and assigned points
-    pts_cv <- sf::st_as_sf(data.frame(cv_fold=pts_id_w[,n_sel]), pts_id[[1]]$geometry)
-    sf::st_geometry(pts_cv) <- "geom"
+    # nnd distances
+    Gjstar <- Gjstar[[n_sel]]
 
-    # nnd plot and distances
-    cv_dist_sel <- cv_dist[[n_sel]]}
-
-  cv_s2p <- rbind(cv_dist_sel, s2p)
-
-  plot.nnd_ecdf <- function(x) {
-    xlab="geographic distances"
-    ggplot2::ggplot(x, aes(x=dist, group=what, fill=what)) +
-      ggplot2::stat_ecdf(aes(ymin=0,ymax=..y..), geom="ribbon", alpha=0.6) +
-      ggplot2::stat_ecdf(geom="step") +
-      ggplot2::scale_fill_discrete(name = "distance function") +
-      ggplot2::xlab(xlab) +
-      ggplot2::theme(legend.position="bottom",
-                     plot.margin = unit(c(0,0.5,0,0),"cm"))
+    stat_final <- ws_dist[ws_dist$D==min(ws_dist$D),"D"][[1]]
+    blocks <- pts_id_w[,n_sel]
   }
-
-  plot.nnd <- function(x){
-    what <- "" #just to avoid check note
-    unit ="m"
-    xlab="geographic distances"
-    ggplot2::ggplot(data=x, aes(x=as.numeric(dist), group=what, fill=what)) +
-      ggplot2::geom_density(adjust=1.5, alpha=.4, stat="density") +
-      ggplot2::scale_fill_discrete(name = "distance function") +
-      ggplot2::xlab(xlab) +
-      ggplot2::theme(legend.position="bottom",
-                     plot.margin = unit(c(0,0.5,0,0),"cm"))
-  }
-
-  nnd_plot <- plot.nnd(cv_s2p)
-  nnd_plot_ecdf <- plot.nnd_ecdf(cv_s2p)
-  nnd_distances <- cv_dist_sel
-
-  rtrn <- list(indx_train = spatialfolds$index, indx_test = spatialfolds$indexOut, pts_cv,
-               nnd_plot, nnd_plot_ecdf, nnd_distances, ws_dist[ws_dist$D==min(ws_dist$D),"D"])
-    names(rtrn) <- c("indx_train","indx_test", "pts_with_cv", "nnd_plot", "nnd_plot_ecdf", "nnd_distances", "WS_distance")
-  return(rtrn)
+  # Output
+  res <- list(blocks = blocks,
+              indx_train = cfolds$index, indx_test = cfolds$indexOut,
+              Gij = Gij, Gj = Gj, Gjstar = Gjstar, stat = stat_final)
+  class(res) <- c("knndm", "list")
+  res
 
 }
+
+
