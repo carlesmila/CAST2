@@ -31,7 +31,8 @@
 #' @export
 #'
 #' @examples
-#' #' library(sf)
+#' \dontrun{
+#' library(sf)
 #' library(raster)
 #' library(ggplot2)
 #'
