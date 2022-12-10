@@ -26,7 +26,8 @@
 #' @param cl A cluster object.
 #' @details The nearest neighbor distance distribution between training and prediction locations,
 #' as well as between cross-validation folds are calculated. Based on that, the
-#' cross-validation split yielding the lowest distance between those distributions is chosen.#' @details TBC.
+#' cross-validation split yielding the lowest distance between those distributions is chosen.
+#' @details TBC.
 #' @note Experimental.
 #' @export
 #'
@@ -74,32 +75,9 @@ bnndm <- function(x=NULL,
                      cl=NULL) {
 
 
-  # input formatting --------------------------------------------------------
+  #### helper functions -----------
 
-  possible_n <- 2:maxn
-
-
-  if (!inherits(x, "sf")) {
-    x <- sf::st_as_sf(x) |>
-      sf::st_geometry() |>
-      sf::st_as_sf()
-  } else {
-    x <- sf::st_geometry(x) |>
-      sf::st_as_sf()
-  }
-
-  x <- sf::st_transform(x,4326)
-
-  if(inherits(modeldomain,"Raster")) {
-    modeldomain <- terra::rast(modeldomain)
-  }
-
-  modeldomain <- terra::project(modeldomain, terra::crs(x))
-
-
-  # calculate nn distance of samples to prediction --------------------------
-
-   # Sample prediction location from the study area:
+  # Sample prediction location from the study area:
   sampleFromArea <- function(modeldomain, samplesize, sampling){
 
     ##### Distance to prediction locations:
@@ -131,11 +109,7 @@ bnndm <- function(x=NULL,
 
   }
 
-
-  # calculate sample2prediction distance
-  modeldomain <- sampleFromArea(modeldomain, samplesize, sampling)
-
-  # Helper function: Compute out-of-fold NN distance
+  # Compute out-of-fold NN distance
   distclust <- function(distm, folds){
 
     alldist <- c()
@@ -144,6 +118,63 @@ bnndm <- function(x=NULL,
     }
     alldist
   }
+
+  # Compute CV distances
+  cvdistance <- function(x, cvfolds){
+    d_cv <- c()
+    d_cv <- lapply(cvfolds, function(y) {
+      d_cv_tmp <- sf::st_distance(x[y,], x[-y,])
+      c(d_cv,apply(d_cv_tmp, 1, min))
+    }) |> unlist()
+
+    d_cv
+  }
+
+
+  # function to assign folds based on probabilities
+  sample_f <- function(current_prob, current_fold) {
+
+    other_folds <- c(1:possible_n[[1]])[-current_fold]
+
+    if(current_prob >= 1) {
+      other_probs <- rep(0, length(other_folds))
+    } else {
+      other_probs <-  rep((1-current_prob)/(length(other_folds)),
+                          length(other_folds))
+    }
+
+    sample(c(current_fold, other_folds),
+           size = 1,
+           prob = c(current_prob, other_probs))
+  }
+
+  # input formatting --------------------------------------------------------
+
+  possible_n <- 2:maxn
+
+
+  if (!inherits(x, "sf")) {
+    x <- sf::st_as_sf(x) |>
+      sf::st_geometry() |>
+      sf::st_as_sf()
+  } else {
+    x <- sf::st_geometry(x) |>
+      sf::st_as_sf()
+  }
+
+  x <- sf::st_transform(x,4326)
+
+  if(inherits(modeldomain,"Raster")) {
+    modeldomain <- terra::rast(modeldomain)
+  }
+
+  modeldomain <- terra::project(modeldomain, terra::crs(x))
+
+
+  # calculate nn distance of samples to prediction --------------------------
+
+  # calculate sample2prediction distance
+  modeldomain <- sampleFromArea(modeldomain, samplesize, sampling)
 
   # Gj: NND function for a cluster per point, i.e. LOO CV
   clust <- 1:nrow(x)
@@ -193,25 +224,8 @@ bnndm <- function(x=NULL,
         CAST::CreateSpacetimeFolds(inp, spacevar = colnames(inp), k=k)
         })
     } else {
+
       # assign folds based on probabilities -----------------------------------
-
-      # function to assign folds based on probabilities
-      sample_f <- function(current_prob, current_fold) {
-
-        other_folds <- c(1:possible_n[[1]])[-current_fold]
-
-        if(current_prob >= 1) {
-          other_probs <- rep(0, length(other_folds))
-        } else {
-          other_probs <-  rep((1-current_prob)/(length(other_folds)),
-                              length(other_folds))
-        }
-
-        sample(c(current_fold, other_folds),
-               size = 1,
-               prob = c(current_prob, other_probs))
-      }
-
       # define probabilities
       pmin <- 1/possible_n
       probs <- lapply(pmin, function(pmin) {
@@ -233,37 +247,30 @@ bnndm <- function(x=NULL,
         return(y)
       })
 
+      # assign folds
+      pts_f <- pts_p
+      for (i in seq_along(pts_p)) {
+        for (k in 1:nrow(pts_p[[i]])){
+          for (j in 1:ncol(pts_p[[i]][2:ncol(pts_p[[i]])])) {
+            all_folds = unique(pts_p[[i]][,"groups"])
+            current_fold = pts_p[[i]][k,"groups"]
+            other_folds = all_folds[all_folds != current_fold]
+            current_prob = pts_p[[i]][k,j+1]
+            other_probs =  rep((1-current_prob)/(length(other_folds)),
+                                length(other_folds))
 
-      # sample folds and assign them to the reduced grid
-      df_temp <- data.frame(matrix(nrow=nrow(pts_p[[1]]),ncol=length(pts_p)))
-      f <- lapply(1:length(pts_p), function(x) x=df_temp)
+            pts_f[[i]][k,paste0("fold_", j)] = sample(c(current_fold, other_folds),
+                   size = 1,
+                   prob = c(current_prob, other_probs))
 
-      pts_folds <- list()
-
-      for(i in seq_along(pts_p)) {
-        for (j in 1:nrow(pts_p[[i]])) {
-          for (k in paste0("probs_",1:(ncol(pts_p[[i]])-1))) {
-            current_fold <- pts_p[[i]][j,"groups"]
-            current_prob <- pts_p[[i]][j, k]
-
-            f[[i]][j,k] <- sample_f(current_prob, current_fold)
           }
         }
-        f[[i]] <- f[[i]][,grepl("probs", colnames(f[[i]]))]
-        colnames(f[[i]]) <- paste0("fold_", 1:n_steps)
-        pts_p[[i]] <- cbind(pts_p[[i]], f[[i]])
-        pts_p[[i]] <- pts_p[[i]][,colnames(pts_p[[i]]) %in% colnames(f[[i]])]
-
-        pts_folds[[i]] <-  sf::st_as_sf(pts_p[[i]], sf::st_geometry(pts_clust))
-
+        pts_f[[i]] <- pts_f[[i]][,grepl("fold_", colnames(pts_f[[i]]))]
+        colnames(pts_f[[i]]) <- paste0(i+1,"_fold_p_", 1:ncol(pts_f[[i]]))
       }
 
-      pts_id_w <- lapply(pts_folds,function(x) sf::st_drop_geometry(x) |> as.data.frame())
-      for (i in seq_along(pts_id_w)) {
-        colnames(pts_id_w[[i]]) <- paste0(i+1,"_fold_p_", 1:ncol(pts_id_w[[i]]))
-      }
 
-      pts_id_w <- do.call(cbind.data.frame, pts_id_w)
+      pts_id_w <- do.call(cbind.data.frame, pts_f)
       # folds _ number of probability step
 
       # create caret folds
@@ -272,27 +279,16 @@ bnndm <- function(x=NULL,
       for (i in 1:ncol(pts_id_w)) {
         df_c[[i]] <- as.data.frame(pts_id_w[,i])
         names(df_c[[i]]) <- paste0("cl_",i)
-        f[[i]] <- length(unique(df_c[[i]][!is.na(df_c[[i]])]))
+        pts_f[[i]] <- length(unique(df_c[[i]][!is.na(df_c[[i]])]))
         spatialfolds[[i]] <- CAST::CreateSpacetimeFolds(df_c[[i]],
                                                         spacevar = paste0("cl_",i),
-                                                        k=f[[i]])
+                                                        k=pts_f[[i]])
       }
     }
 
 
 
     # calculate nn distance of cv folds ---------------------------------------
-
-    cvdistance <- function(x, cvfolds){
-      d_cv <- c()
-      d_cv <- lapply(cvfolds, function(y) {
-        d_cv_tmp <- sf::st_distance(x[y,], x[-y,])
-        c(d_cv,apply(d_cv_tmp, 1, min))
-      }) |> unlist()
-
-      d_cv
-    }
-
 
     # loop over folds to calculate CV-distance for each block size
     if(!is.null(cl)) {

@@ -51,7 +51,9 @@ a caret object inheriting the folds.
 \details{
 The nearest neighbor distance distribution between training and prediction locations,
 as well as between cross-validation folds are calculated. Based on that, the
-cross-validation split yielding the lowest distance between those distributions is chosen.#' @details TBC.
+cross-validation split yielding the lowest distance between those distributions is chosen.
+
+TBC.
 }
 \note{
 Experimental.
