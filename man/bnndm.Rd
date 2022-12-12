@@ -33,20 +33,9 @@ If NULL (default), the samplesize equals the number of cells in the predictor ra
 \description{
 This function estimates the optimal cross-validation folds.
 Therefore the function calculates the nearest neighbor distance
-between training locations and prediction locations, as well as
-between different cross-validation folds.
-The resulting numerical vectors are then used to calculate
-density distributions. The magnitude of difference between
-the prediction to sample nearest neighbor density distribution to
-that of different cross-validation folds is quantified using
-the Wasserstein test. The cross-validation folds yielding
-the lowest magnitude of distance towards the sample to prediction
-nearest neighbor density distribution is then chosen as the final
-split.
-The function returns the density distribution plots,
-the training points with assigned cross-validation folds,
-the grid that was used to split the data, as well as
-a caret object inheriting the folds.
+between training locations and prediction locations (Gij), as well as
+between different cross-validation folds  (Gjstar). The Wasserstein-Test is used
+to select the CV-folds yielding the lowest distance between Gjstar and Gij.
 }
 \details{
 The nearest neighbor distance distribution between training and prediction locations,

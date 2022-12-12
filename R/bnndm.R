@@ -123,7 +123,6 @@ bnndm <- function(x=NULL,
 
   possible_n <- 2:maxn
 
-
   if (!inherits(x, "sf")) {
     x <- sf::st_as_sf(x) |>
       sf::st_geometry() |>
